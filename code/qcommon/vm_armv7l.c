@@ -39,7 +39,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define PC	15
 
 #define rOPSTACK	5
-#define rOPSTACKOFS	6
+#define rOPSTACKBASE	6
 #define rCODEBASE	7
 #define rPSTACK		8
 #define rDATABASE	9
@@ -171,15 +171,6 @@ static const char *opnames[256] = {
 	do { Com_Printf(S_COLOR_RED "instruction not implemented: %x\n", x); vm->compiled = qfalse; return; } while(0)
 #endif
 
-#define MAYBE_EMIT_CONST() \
-	if (got_const) \
-	{ \
-		got_const = 0; \
-		vm->instructionPointers[instruction-1] = assembler_get_code_size(); \
-		STACK_PUSH(4); \
-		emit("movl $%d, (%%r9, %%rbx, 4)", const_value); \
-	}
-
 static void VM_Destroy_Compiled(vm_t *vm)
 {
 	if (vm->codeBase) {
@@ -269,9 +260,6 @@ static unsigned short rimm(unsigned val)
 #define EQ (0b0000<<28)
 #define AL (0b1110<<28) // always 
 
-#define LDR ((1<<26)|(1<<25)|(1<<20))
-#define LDRi (1<<26|1<<20)
-
 // immediate value must fit in 0xFF!
 #define ANDi(dst, src, i) (AL | (0b001<<25) | (0b00000<<20) | (src<<16) | (dst<<12) | rimm(i))
 #define EORi(dst, src, i) (AL | (0b001<<25) | (0b00010<<20) | (src<<16) | (dst<<12) | rimm(i))
@@ -325,6 +313,21 @@ static unsigned short rimm(unsigned val)
 #define BIC(dst, src, reg) (AL | (0b000<<25) | (0b11100<<20) | (src<<16) | (dst<<12) | reg)
 #define MVN(dst, src, reg) (AL | (0b000<<25) | (0b11110<<20) | (src<<16) | (dst<<12) | reg)
 
+                                                 /* PUBW */
+#define LDRa(dst, base, off) (AL | (0b011<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | off)
+#define LDRx(dst, base, off) (AL | (0b011<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | off)
+                                                   /* PUBW */
+#define LDRai(dst, base, off)  (AL | (0b010<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
+#define LDRxi(dst, base, off)  (AL | (0b010<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
+#define LDRxiw(dst, base, off) (AL | (0b010<<25) | (0b1001<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
+
+                                                   /* PUBW */
+#define STRa(dst, base, off)   (AL | (0b011<<25) | (0b1100<<21) | (0<<20) | base<<16 | dst<<12 | off)
+#define STRx(dst, base, off)   (AL | (0b011<<25) | (0b1000<<21) | (0<<20) | base<<16 | dst<<12 | off)
+#define STRai(dst, base, off)  (AL | (0b010<<25) | (0b1100<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
+#define STRxi(dst, base, off)  (AL | (0b010<<25) | (0b1000<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
+#define STRaiw(dst, base, off) (AL | (0b010<<25) | (0b1101<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
+#define STRxiw(dst, base, off) (AL | (0b010<<25) | (0b1001<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
 
 #define Bi(i) \
 	(AL | (0b10)<<26 | (1<<25) /*I*/ | (0<<24) /*L*/ | rimm(i))
@@ -341,6 +344,27 @@ static unsigned short rimm(unsigned val)
 #define MUL(op1, op2, op3) \
 	(AL | 0b0000000<<21 | (1<<20) /*S*/ | (op1<<16) | (op3<<8) | 0b1001<<4 | (op2))
 
+
+#define STACK_PUSH(bytes) \
+	emit("addb $0x%x, %%bl", bytes >> 2); \
+
+#define STACK_POP(bytes) \
+	emit("subb $0x%x, %%bl", bytes >> 2); \
+
+//#define CONST_OPTIMIZE
+#ifdef CONST_OPTIMIZE
+#define MAYBE_EMIT_CONST() \
+	if (got_const) \
+	{ \
+		got_const = 0; \
+		vm->instructionPointers[instruction-1] = assembler_get_code_size(); \
+		STACK_PUSH(4); \
+		emit("movl $%d, (%%r9, %%rbx, 4)", const_value); \
+	}
+#else
+#define MAYBE_EMIT_CONST()
+#endif
+
 void VM_Compile(vm_t *vm, vmHeader_t *header)
 {
 	unsigned char *code;
@@ -353,6 +377,9 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	vm->codeLength = 0;
 
 	for (pass = 0; pass < 2; ++pass) {
+
+	// const optimization
+	unsigned got_const = 0, const_value = 0;
 
 	if(pass)
 	{
@@ -378,27 +405,37 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	emit(PUSH2(FP, LR));
 	emit(ADDi(FP, SP, 4));
 	emit(SUBi(SP, SP, 1024));
-	emit(MOV(rOPSTACK, SP));
-	emit(MOVi(rOPSTACKOFS, 0));
+	emit(MOV(rOPSTACK, SP)); // TODO: reverse opstack to avoid writing to return address
+	emit(MOV(rOPSTACKBASE, SP));
 	emit(MOV(rCODEBASE, R0));
 	emit(MOV(rPSTACK, R1));
 	emit(MOV(rDATABASE, R2));
 	emit(MOV(rDATAMASK, R3));
-	emit(MOVi(R0, 42));
-	emit(SUBi(SP, FP, 4));
 #endif
-	emit(0xe8bd8800); // pop     {fp, pc};
-	emit(0xe1200070); // bkpt    0x0000
+	//emit(0xe1200070); // bkpt    0x0000
 
 	code = (unsigned char *) header + header->codeOffset;
 	pc = 0;
 
 	for (i_count = 0; i_count < header->instructionCount; i_count++) {
+		union {
+			unsigned char b[4];
+			unsigned int i;
+		} arg;
 		unsigned char op = code[pc++];
+
 		vm->instructionPointers[i_count] = vm->codeLength;
 
-#warning debug
-		continue;
+		if (vm_opInfo[op] & opImm4)
+		{
+			memcpy(arg.b, &code[pc], 4);
+			pc += 4;
+		}
+		else if (vm_opInfo[op] & opImm1)
+		{
+			arg.b[0] = code[pc];
+			++pc;
+		}
 
 		switch ( op )
 		{
@@ -415,11 +452,14 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_ENTER:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(SUBi(rPSTACK, rPSTACK, arg.b[0])); // pstack -= arg
 				break;
 
 			case OP_LEAVE:
-				NOTIMPL(op);
+				emit(ADDi(rPSTACK, rPSTACK, arg.b[0])); // pstack += arg
+				emit(SUBi(SP, FP, 4));
+				emit(0xe8bd8800); // pop     {fp, pc};
 				break;
 
 			case OP_CALL:
@@ -427,7 +467,8 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_PUSH:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(ADDi(rOPSTACK, rOPSTACK, 4));
 				break;
 
 			case OP_POP:
@@ -439,7 +480,10 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_LOCAL:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(ADD(R0, rDATABASE, rPSTACK));  // r0 = dataBase+programStack
+				emit(ADDi(R0, R0, arg.i));         // r1 = r0[arg]
+				emit(STRaiw(R0, rOPSTACK, 4));      // opstack+=4; *opstack = r0
 				break;
 
 			case OP_JUMP:
@@ -519,7 +563,10 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_LOAD4:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(LDRai(R0, rOPSTACK, 0)); // r0 = *opstack
+				emit(LDRai(R0, R0, 0));       // r0 = *r0
+				emit(STRai(R0, rOPSTACK, 0)); // *opstack = r0
 				break;
 
 			case OP_STORE1:
@@ -556,7 +603,11 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_ADD:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(LDRai(R0, rOPSTACK, 0));  // r0 = *opstack
+				emit(LDRxiw(R1, rOPSTACK, 4)); // opstack-=4; r1 = *opstack
+				emit(ADD(R0, R1, R0));         // r0 = r1 + r0
+				emit(STRai(R0, rOPSTACK, 0));  // *opstack = r0
 				break;
 
 			case OP_SUB:
@@ -644,6 +695,12 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 		}
 	}
+
+	emit(0xe1200070); // bkpt    0x0000
+	// XXX
+	emit(MOVi(R0, 42));
+	emit(SUBi(SP, FP, 4));
+	emit(0xe8bd8800); // pop     {fp, pc};
 
 	} // pass
 
