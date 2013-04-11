@@ -46,9 +46,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define rDATAMASK	10
 
 /* exit() won't be called but use it because it is marked with noreturn */
-#define DIE( reason ) \
+#define DIE( reason, args... ) \
 	do { \
-		Com_Error(ERR_DROP, "vm_arm compiler error: " reason); \
+		Com_Error(ERR_DROP, "vm_arm compiler error: " reason, ##args); \
 		exit(1); \
 	} while(0)
 
@@ -249,7 +249,7 @@ static unsigned short rimm(unsigned val)
 		++shift;
 	}
 	if (shift > 15 || val > 255) {
-		DIE("immediate cannot be encoded\n");
+		DIE("immediate cannot be encoded (%d, %d)\n", shift, val);
 	}
 	return (16-shift)<<8 | val;
 }
@@ -320,10 +320,10 @@ static unsigned short rimm(unsigned val)
 #define BIC(dst, src, reg) (AL | (0b000<<25) | (0b11100<<20) | (src<<16) | (dst<<12) | reg)
 #define MVN(dst, src, reg) (AL | (0b000<<25) | (0b11110<<20) | (src<<16) | (dst<<12) | reg)
 
-                                                 /* PUBW */
-#define LDRa(dst, base, off) (AL | (0b011<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | off)
-#define LDRx(dst, base, off) (AL | (0b011<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | off)
-                                                   /* PUBW */
+                                                   /* PUBW */    /* L/S */
+#define LDRa(dst, base, off)   (AL | (0b011<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | off)
+#define LDRx(dst, base, off)   (AL | (0b011<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | off)
+
 #define LDRai(dst, base, off)  (AL | (0b010<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 #define LDRxi(dst, base, off)  (AL | (0b010<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 #define LDRxiw(dst, base, off) (AL | (0b010<<25) | (0b1001<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
@@ -333,7 +333,6 @@ static unsigned short rimm(unsigned val)
 #define LDRTai(dst, base, off) (AL | (0b010<<25) | (0b0101<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 #define LDRTxi(dst, base, off) (AL | (0b010<<25) | (0b0001<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 
-                                                   /* PUBW */
 #define STRa(dst, base, off)   (AL | (0b011<<25) | (0b1100<<21) | (0<<20) | base<<16 | dst<<12 | off)
 #define STRx(dst, base, off)   (AL | (0b011<<25) | (0b1000<<21) | (0<<20) | base<<16 | dst<<12 | off)
 #define STRai(dst, base, off)  (AL | (0b010<<25) | (0b1100<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
@@ -341,13 +340,24 @@ static unsigned short rimm(unsigned val)
 #define STRaiw(dst, base, off) (AL | (0b010<<25) | (0b1101<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
 #define STRxiw(dst, base, off) (AL | (0b010<<25) | (0b1001<<21) | (0<<20) | base<<16 | dst<<12 | rimm(off))
 
-#define Bi(i) \
-	(AL | (0b10)<<26 | (1<<25) /*I*/ | (0<<24) /*L*/ | rimm(i))
-#define BLi(i) \
-	(AL | (0b10)<<26 | (1<<25) /*I*/ | (1<<24) /*L*/ | rimm(i))
+// load with post-increment
+#define POP1(reg)              (AL | (0b010<<25) | (0b0100<<21) | (1<<20) |   SP<<16 | reg<<12 | reg)
+// store with post-increment
+#define PUSH1(reg)             (AL | (0b010<<25) | (0b1001<<21) | (0<<20) |   SP<<16 | reg<<12 | 4)
 
+#define Bi(i) \
+	(AL | (0b10)<<26 | (1<<25) /*I*/ | (0<<24) /*L*/ | (i))
+#define BLi(i) \
+	(AL | (0b10)<<26 | (1<<25) /*I*/ | (1<<24) /*L*/ | (i))
+
+#define BLX(reg) \
+	(AL | 0b00010010<<20 | 0b1111<<16 | 0b1111<<12 | 0b1111<<8| 0b0011<<4 | reg)
+
+#define PUSH(mask)    (AL | (0b100100<<22) | (0b10<<20) | (0b1101<<16) |  mask)
 #define PUSH2(r1, r2) (AL | (0b100100<<22) | (0b10<<20) | (0b1101<<16) |  1<<r1 | 1<<r2)
-#define PUSH1(r1)     (AL | (0b010<<25) | (0b10010<<20) | (0b1101<<16) | r1<<12 | 0b100)
+//#define PUSH1(reg) STRxiw(SP, reg, 4)
+
+#define POP(mask)     (0xe8bd0000|mask)
 
 #define STM(base, regs) \
 	(AL | 0b100<<25 | 0<<24/*P*/| 0<<24/*U*/| 0<<24/*S*/| 0<<24/*W*/ | (base<<16) | (regs&~(1<<16)))
@@ -377,11 +387,15 @@ static unsigned short rimm(unsigned val)
 #define MAYBE_EMIT_CONST()
 #endif
 
+#define printreg(reg) emit(PUSH1(R3)); emit(BLX(reg)); emit(POP1(R3));
+
+#define OFFSET(var) (pass?((var-vm->codeLength)>>2)-2:(0xF000000F))
 void VM_Compile(vm_t *vm, vmHeader_t *header)
 {
 	unsigned char *code;
 	int i_count, pc, i;
 	int pass;
+	int startoffset = 0xf00ba1;
 
 	vm->compiled = qfalse;
 
@@ -401,30 +415,31 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 		vm->codeLength = 0;
 	}
 
-#if 0
-	emit(0xe92d4800); // push    {fp, lr}
-	emit(0xe28db004); // add     fp, sp, #4
-	emit(0xe24ddb01); // sub     sp, sp, #1024 ; 0x400
-	emit(0xe1a0500d); // mov     r5, sp;
-	emit(0xe3a06000); // mov     r6, #0;
-	emit(0xe1a07000); // mov     r7, r0
-	emit(0xe1a08001); // mov     r8, r1
-	emit(0xe1a09002); // mov     r9, r2
-	emit(0xe1a0a003); // mov     r10, r3
-	emit(0xe3a0002a); // mov     r0, #42 ; 0x2a;
-	emit(0xe24bd004); // sub     sp, fp, #4
-#else
+	//int (*entry)(vm_t*, int*, int*);
 	emit(PUSH2(FP, LR));
 	emit(ADDi(FP, SP, 4));
-	emit(SUBi(SP, SP, 1024));
-	emit(MOV(rOPSTACK, SP)); // TODO: reverse opstack to avoid writing to return address
-	emit(MOV(rOPSTACKBASE, SP));
-	emit(MOV(rCODEBASE, R0));
-	emit(MOV(rPSTACK, R1));
-	emit(MOV(rDATABASE, R2));
-	emit(MOV(rDATAMASK, R3));
-#endif
-	//emit(0xe1200070); // bkpt    0x0000
+	emit(LDRai(rCODEBASE, R0, offsetof(vm_t, codeBase)));
+	emit(LDRai(rDATABASE, R0, offsetof(vm_t, dataBase)));
+	emit(LDRai(rDATAMASK, R0, offsetof(vm_t, dataMask)));
+	emit(LDRai(rPSTACK, R1, 0));
+	emit(MOV(rOPSTACK, R2)); // TODO: reverse opstack to avoid writing to return address
+	emit(MOV(rOPSTACKBASE, rOPSTACK));
+
+	emit(PUSH((1<<R1)|(1<<R2)));
+	emit(BLi(OFFSET(startoffset)));
+	emit(POP((1<<R1)|(1<<R2))); // pop     {r1, r2}
+
+	emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
+
+	emit(SUBi(SP, FP, 4));
+	emit(0xe8bd8800); // pop     {fp, pc};
+
+	emit(0xe1200070); /* just some space in case we jump wrongly */
+	emit(0xe1200070);
+	emit(0xe1200070);
+	emit(0xe1200070);
+
+	startoffset = vm->codeLength;
 
 	code = (unsigned char *) header + header->codeOffset;
 	pc = 0;
@@ -465,13 +480,13 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_ENTER:
 				MAYBE_EMIT_CONST();
+				emit(PUSH1(LR));
 				emit(SUBi(rPSTACK, rPSTACK, arg.i)); // pstack -= arg
 				break;
 
 			case OP_LEAVE:
 				emit(ADDi(rPSTACK, rPSTACK, arg.i)); // pstack += arg
-				emit(SUBi(SP, FP, 4));
-				emit(0xe8bd8800); // pop     {fp, pc};
+				emit(0xe49df004); // pop pc
 				break;
 
 			case OP_CALL:
@@ -583,9 +598,10 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_LOAD4:
 				MAYBE_EMIT_CONST();
-				emit(LDRai(R0, rOPSTACK, 0));    // r0 = *opstack
+				emit(LDRai(R0, rOPSTACK, 0));   // r0 = *opstack
 				emit(LDRa(R0, rDATABASE, R0));  // r0 = dataBase[r0]
-				emit(STRai(R0, rOPSTACK, 0));    // *opstack = r0
+				emit(STRai(R0, rOPSTACK, 0));   // *opstack = r0
+
 				break;
 
 			case OP_STORE1:
@@ -598,7 +614,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_STORE4:
 				MAYBE_EMIT_CONST();
-	emit(0xe1200070); // bkpt    0x0000 // breakpoint
+				//emit(0xe1200070); // bkpt    0x0000 // breakpoint
 				// optimize: use load multiple
 				// value
 				emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
@@ -749,13 +765,20 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	vm->compiled = qtrue;
 }
 
+static void dbg(int v)
+{
+	Com_Printf("dbg 0x%x\n", v);
+}
+
 int VM_CallCompiled(vm_t *vm, int *args)
 {
-	int programStack = vm->programStack;
-	int stackOnEntry = programStack;
-	byte *image = vm->dataBase;
-	int *argPointer;
-	int retVal;
+	byte	stack[OPSTACK_SIZE + 15];
+	int	*opStack;
+	int	programStack = vm->programStack;
+	int	stackOnEntry = programStack;
+	byte	*image = vm->dataBase;
+	int	*argPointer;
+	int	retVal;
 
 	currentVM = vm;
 
@@ -767,15 +790,34 @@ int VM_CallCompiled(vm_t *vm, int *args)
 	argPointer[-1] = 0;
 	argPointer[-2] = -1;
 
+
+	opStack = PADP(stack, 16);
+	*opStack = 0xDEADBEEF;
+
+	Com_Printf("r5 opStack:\t\t%p\n", opStack);
+	Com_Printf("r7 codeBase:\t\t%p\n", vm->codeBase);
+	Com_Printf("r8 programStack:\t0x%x\n", programStack);
+	Com_Printf("r9 dataBase:\t\t%p\n", vm->dataBase);
+
 	/* call generated code */
 	{
-		int (*entry)(void *, int, void *, int);
+		//int (*entry)(void *, int, void *, int);
+		int (*entry)(vm_t*, int*, int*, void(*)(int));
 
 		entry = (void *)(vm->codeBase);
 		//__asm__ volatile("bkpt");
-		retVal = entry(vm->codeBase, programStack, vm->dataBase, vm->dataMask);
+		//retVal = entry(vm->codeBase, programStack, vm->dataBase, vm->dataMask);
+		retVal = entry(vm, &programStack, opStack, dbg);
 		Com_Printf("%d\n", retVal);
 	}
+
+	if(*opStack != 0xDEADBEEF)
+	{
+		Com_Error(ERR_DROP, "opStack corrupted in compiled code");
+	}
+
+	if(programStack != stackOnEntry - (8 + 4 * MAX_VMMAIN_ARGS))
+		Com_Error(ERR_DROP, "programStack corrupted in compiled code");
 
 	vm->programStack = stackOnEntry;
 	vm->currentlyInterpreting = qfalse;
