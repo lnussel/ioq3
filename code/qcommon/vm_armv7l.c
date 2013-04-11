@@ -48,7 +48,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 /* exit() won't be called but use it because it is marked with noreturn */
 #define DIE( reason ) \
 	do { \
-		Com_Error(ERR_DROP, "vm_sparc compiler error: " reason); \
+		Com_Error(ERR_DROP, "vm_arm compiler error: " reason); \
 		exit(1); \
 	} while(0)
 
@@ -256,6 +256,11 @@ static unsigned short rimm(unsigned val)
 
 #define PREINDEX (1<<24)
 
+#define rASR 0b10
+#define rLSL 0b00
+#define rLSR 0b01
+#define rROR 0b11.
+
 // conditions
 #define EQ (0b0000<<28)
 #define AL (0b1110<<28) // always 
@@ -274,6 +279,8 @@ static unsigned short rimm(unsigned val)
 #define MOVi(dst,      i) (AL | (0b001<<25) | (0b11010<<20) |             (dst<<12) | rimm(i))
 #define BICi(dst, src, i) (AL | (0b001<<25) | (0b11100<<20) | (src<<16) | (dst<<12) | rimm(i))
 #define MVNi(dst, src, i) (AL | (0b001<<25) | (0b11110<<20) | (src<<16) | (dst<<12) | rimm(i))
+
+#define MOVM(dst,      i) (AL |  (0b11<<24) | (((i>>12)&0xF)<<16) | (dst<<12) | (i&((1<<12)-1)))
 
 #define TSTi(     src, i) (AL | (0b001<<25) | (0b10001<<20) | (src<<16) |             rimm(i))
 #define TEQi(     src, i) (AL | (0b001<<25) | (0b10011<<20) | (src<<16) |             rimm(i))
@@ -305,7 +312,7 @@ static unsigned short rimm(unsigned val)
 
 #define ORR(dst, src, reg) (AL | (0b000<<25) | (0b11000<<20) | (src<<16) | (dst<<12) | reg)
 #define MOV(dst,      src) (AL | (0b000<<25) | (0b11010<<20) |             (dst<<12) | src)
-//LSL
+#define LSL(dst, src, i)   (AL | (0b000<<25) | (0b11010<<20) | (dst<<12) | ((i&0x1F)<<7) | src)
 //LSR
 //ASR
 //RRX
@@ -320,6 +327,11 @@ static unsigned short rimm(unsigned val)
 #define LDRai(dst, base, off)  (AL | (0b010<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 #define LDRxi(dst, base, off)  (AL | (0b010<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 #define LDRxiw(dst, base, off) (AL | (0b010<<25) | (0b1001<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
+
+#define LDRTa(dst, base, off)  (AL | (0b011<<25) | (0b0101<<21) | (1<<20) | base<<16 | dst<<12 | off)
+#define LDRTx(dst, base, off)  (AL | (0b011<<25) | (0b0001<<21) | (1<<20) | base<<16 | dst<<12 | off)
+#define LDRTai(dst, base, off) (AL | (0b010<<25) | (0b0101<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
+#define LDRTxi(dst, base, off) (AL | (0b010<<25) | (0b0001<<21) | (1<<20) | base<<16 | dst<<12 | rimm(off))
 
                                                    /* PUBW */
 #define STRa(dst, base, off)   (AL | (0b011<<25) | (0b1100<<21) | (0<<20) | base<<16 | dst<<12 | off)
@@ -453,17 +465,17 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_ENTER:
 				MAYBE_EMIT_CONST();
-				emit(SUBi(rPSTACK, rPSTACK, arg.b[0])); // pstack -= arg
+				emit(SUBi(rPSTACK, rPSTACK, arg.i)); // pstack -= arg
 				break;
 
 			case OP_LEAVE:
-				emit(ADDi(rPSTACK, rPSTACK, arg.b[0])); // pstack += arg
+				emit(ADDi(rPSTACK, rPSTACK, arg.i)); // pstack += arg
 				emit(SUBi(SP, FP, 4));
 				emit(0xe8bd8800); // pop     {fp, pc};
 				break;
 
 			case OP_CALL:
-				NOTIMPL(op);
+				emit(0xe1200070); // bkpt    0x0000
 				break;
 
 			case OP_PUSH:
@@ -476,13 +488,20 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_CONST:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(MOVM(R0, (arg.i&(0xFFFF))));
+				if (arg.i >= 1<<16)
+				{
+					emit(MOVM(R1, ((arg.i>>16)&0xFFFF)));
+					emit(LSL(R1, R1, 16));
+					emit(ORR(R0, R0, R1));
+				}
+				emit(STRaiw(R0, rOPSTACK, 4));      // opstack+=4; *opstack = r0
 				break;
 
 			case OP_LOCAL:
 				MAYBE_EMIT_CONST();
-				emit(ADD(R0, rDATABASE, rPSTACK));  // r0 = dataBase+programStack
-				emit(ADDi(R0, R0, arg.i));         // r1 = r0[arg]
+				emit(ADDi(R0, rPSTACK, arg.i));     // r0 = pstack+arg
 				emit(STRaiw(R0, rOPSTACK, 4));      // opstack+=4; *opstack = r0
 				break;
 
@@ -564,9 +583,9 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_LOAD4:
 				MAYBE_EMIT_CONST();
-				emit(LDRai(R0, rOPSTACK, 0)); // r0 = *opstack
-				emit(LDRai(R0, R0, 0));       // r0 = *r0
-				emit(STRai(R0, rOPSTACK, 0)); // *opstack = r0
+				emit(LDRai(R0, rOPSTACK, 0));    // r0 = *opstack
+				emit(LDRa(R0, rDATABASE, R0));  // r0 = dataBase[r0]
+				emit(STRai(R0, rOPSTACK, 0));    // *opstack = r0
 				break;
 
 			case OP_STORE1:
@@ -578,17 +597,27 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_STORE4:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+	emit(0xe1200070); // bkpt    0x0000 // breakpoint
+				// optimize: use load multiple
+				// value
+				emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
+				// pointer
+				emit(LDRTxi(R1, rOPSTACK, 4));  // r1 = *opstack; rOPSTACK -= 4
+				// store value at pointer
+				emit(STRa(R0, rDATABASE, R1)); // database[r1] = r0
 				break;
 
 			case OP_ARG:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(LDRxiw(R0, rOPSTACK, 4));      // r0 = *opstack; rOPSTACK -= 4
+				emit(ADDi(R1, rPSTACK, arg.b[0]));  // r1 = programStack+arg
+				emit(STRa(R0, rDATABASE, R1));      // dataBase[r1] = r0
 				break;
 
 			case OP_BLOCK_COPY:
 				NOTIMPL(op);
 				break;
-
 
 			case OP_SEX8:
 				NOTIMPL(op);
@@ -611,7 +640,11 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_SUB:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(LDRai(R0, rOPSTACK, 0));  // r0 = *opstack
+				emit(LDRxiw(R1, rOPSTACK, 4)); // opstack-=4; r1 = *opstack
+				emit(SUB(R0, R1, R0));         // r0 = r1 - r0
+				emit(STRai(R0, rOPSTACK, 0));  // *opstack = r0
 				break;
 
 			case OP_DIVI:
@@ -696,7 +729,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 		}
 	}
 
-	emit(0xe1200070); // bkpt    0x0000
+	emit(0xe1200070); // bkpt    0x0000 // breakpoint
 	// XXX
 	emit(MOVi(R0, 42));
 	emit(SUBi(SP, FP, 4));
