@@ -277,8 +277,20 @@ static unsigned short can_encode(unsigned val)
 
 // conditions
 #define EQ (0b0000<<28)
-#define LT (0b1011<<28) // signed less than
-#define AL (0b1110<<28) // always 
+#define NE (0b0001<<28)
+#define CS (0b0010<<28)
+#define CC (0b0011<<28)
+#define MI (0b0100<<28)
+#define PL (0b0101<<28)
+#define VS (0b0110<<28)
+#define VC (0b0111<<28)
+#define HI (0b1000<<28)
+#define LS (0b1001<<28)
+#define GE (0b1010<<28)
+#define LT (0b1011<<28)
+#define GT (0b1100<<28)
+#define LE (0b1101<<28)
+#define AL (0b1110<<28)
 #define cond(what, op) (what | (op&~AL))
 
 // FIXME: v not correctly computed
@@ -339,7 +351,11 @@ static unsigned short can_encode(unsigned val)
 #define BIC(dst, src, reg) (AL | (0b000<<25) | (0b11100<<20) | (src<<16) | (dst<<12) | reg)
 #define MVN(dst, src, reg) (AL | (0b000<<25) | (0b11110<<20) | (src<<16) | (dst<<12) | reg)
 
-                                                   /* PUBW */    /* L/S */
+#define TST(     src, reg) (AL | (0b000<<25) | (0b10001<<20) | (src<<16) |             reg)
+#define TEQ(     src, reg) (AL | (0b000<<25) | (0b10011<<20) | (src<<16) |             reg)
+#define CMP(     src, reg) (AL | (0b000<<25) | (0b10101<<20) | (src<<16) |             reg)
+#define CMN(     src, reg) (AL | (0b000<<25) | (0b10111<<20) | (src<<16) |             reg)
+
 #define LDRa(dst, base, off)   (AL | (0b011<<25) | (0b1100<<21) | (1<<20) | base<<16 | dst<<12 | off)
 #define LDRx(dst, base, off)   (AL | (0b011<<25) | (0b1000<<21) | (1<<20) | base<<16 | dst<<12 | off)
 
@@ -417,6 +433,19 @@ static unsigned short can_encode(unsigned val)
 
 #define printreg(reg) emit(PUSH1(R3)); emit(BLX(reg)); emit(POP1(R3));
 
+static inline unsigned _j_rel(int x, int pc)
+{
+	if (x&3) goto err;
+	if ((x < 0 && ~(x>>2) > 0x7fffff) || (x > 0 && (x>>2) > 0x7fffff))
+		goto err;
+
+	if (x<0)
+		return bit(23)|((-x>>2)-2);
+	return (x>>2)-2;
+err:
+	DIE("jump %d out of range at %d", x, pc);
+}
+
 void VM_Compile(vm_t *vm, vmHeader_t *header)
 {
 	unsigned char *code;
@@ -425,7 +454,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	int startoffset = 0xf00ba1;
 	int codeoffsets[1024];
 
-#define j_rel(x) ((((unsigned)x)>>2)-2)
+#define j_rel(x) (pass?_j_rel(x, pc):0xBAD)
 #define OFFSET(i) (pass?(j_rel(codeoffsets[i]-vm->codeLength)):(0xF000000F))
 #define new_offset() (offsidx++)
 #define get_offset(i) (codeoffsets[i])
@@ -564,11 +593,12 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 					emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
 					emit(CMPi(R0, 0)); // check if syscall
 					emit(cond(LT, Bi(OFFSET(off_syscall))));
-						emit(LDRai(R1, rCODEBASE, get_offset(OFF_IMMEDIATES)+4)); // instructionPointers
+						emit(LDRai(R1, rCODEBASE, get_offset(OFF_IMMEDIATES)+4)); // r1=instructionPointers
 						// FIXME: check range
-						emit(ADD(R0, R0, R1));
+						emit(LDRai(R0, R1, R0)); // r0 = r1[r0]
+						emit(ADD(R0, rCODEBASE, R0)); // r0 = codeBase+r0
 						emit(BLX(R0));
-						emit(Bi(j_rel(vm->instructionPointers[pc+1]-vm->instructionPointers[pc])));
+						emit(Bi(j_rel(vm->instructionPointers[i_count+1]-vm->instructionPointers[i_count])));
 					save_offset(off_syscall);
 					emit(PUSH(bit(rOPSTACK) | bit(rOPSTACKBASE) | bit(rCODEBASE)
 						| bit(rPSTACK)| bit(rDATABASE)| bit(rDATAMASK)));
@@ -613,7 +643,15 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_JUMP:
-				NOTIMPL(op);
+				if(got_const) {
+					NOTIMPL(op);
+				} else {
+					emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
+					emit(LDRai(R1, rCODEBASE, get_offset(OFF_IMMEDIATES)+4)); // instructionPointers
+					// FIXME: check range
+					emit(ADD(R0, R0, R1));
+					emit(BLX(R0));
+				}
 				break;
 
 			case OP_EQ:
@@ -621,7 +659,21 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_NE:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				// optimize: use load multiple
+				emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
+				emit(LDRTxi(R1, rOPSTACK, 4));  // r1 = *opstack; rOPSTACK -= 4
+				emit(CMP(R0, R1));
+				// check?
+#if 0
+				Com_Printf("arg %d i %d | %d-%d = %d -> 0x%x\n", arg.i, i_count,
+						vm->instructionPointers[arg.i],
+						vm->codeLength,
+						vm->instructionPointers[arg.i] - vm->codeLength,
+						j_rel(vm->instructionPointers[arg.i]-vm->codeLength));
+#endif
+				//emit(BKPT(0));
+				emit(cond(NE, Bi(j_rel(vm->instructionPointers[arg.i]-vm->codeLength))));
 				break;
 
 			case OP_LTI:
