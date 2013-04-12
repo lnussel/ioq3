@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define R1	1
 #define R2	2
 #define R3	3
+#define R4	4
 
 #define FP	11
 #define SP	13
@@ -44,6 +45,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define rPSTACK		8
 #define rDATABASE	9
 #define rDATAMASK	10
+#define bit(x) (1<<x)
 
 /* exit() won't be called but use it because it is marked with noreturn */
 #define DIE( reason, args... ) \
@@ -180,14 +182,6 @@ static void VM_Destroy_Compiled(vm_t *vm)
 	vm->codeBase = NULL;
 }
 
-#ifdef offsetof
-# define VM_Data_Offset(field)		offsetof(vm_data_t, field)
-#else
-# define OFFSET(structName, field) \
-	((void *)&(((structName *)NULL)->field) - NULL)
-# define VM_Data_Offset(field)		OFFSET(vm_data_t, field)
-#endif
-
 static int asmcall(int call, int pstack)
 {
 	vm_t *savedVM = currentVM;
@@ -263,7 +257,12 @@ static unsigned short rimm(unsigned val)
 
 // conditions
 #define EQ (0b0000<<28)
+#define LT (0b1011<<28) // signed less than
 #define AL (0b1110<<28) // always 
+#define cond(what, op) (what | (op&~AL))
+
+// FIXME: v not correctly computed
+#define BKPT(v) (AL | 0b10010<<20 | ((v>>4)&0xfff) | 0b0111<<4 | (v&0xF))
 
 // immediate value must fit in 0xFF!
 #define ANDi(dst, src, i) (AL | (0b001<<25) | (0b00000<<20) | (src<<16) | (dst<<12) | rimm(i))
@@ -280,7 +279,7 @@ static unsigned short rimm(unsigned val)
 #define BICi(dst, src, i) (AL | (0b001<<25) | (0b11100<<20) | (src<<16) | (dst<<12) | rimm(i))
 #define MVNi(dst, src, i) (AL | (0b001<<25) | (0b11110<<20) | (src<<16) | (dst<<12) | rimm(i))
 
-#define MOVM(dst,      i) (AL |  (0b11<<24) | (((i>>12)&0xF)<<16) | (dst<<12) | (i&((1<<12)-1)))
+#define MOVW(dst,      i) (AL |  (0b11<<24) | (((i>>12)&0xF)<<16) | (dst<<12) | (i&((1<<12)-1)))
 
 #define TSTi(     src, i) (AL | (0b001<<25) | (0b10001<<20) | (src<<16) |             rimm(i))
 #define TEQi(     src, i) (AL | (0b001<<25) | (0b10011<<20) | (src<<16) |             rimm(i))
@@ -366,6 +365,15 @@ static unsigned short rimm(unsigned val)
 #define MUL(op1, op2, op3) \
 	(AL | 0b0000000<<21 | (1<<20) /*S*/ | (op1<<16) | (op3<<8) | 0b1001<<4 | (op2))
 
+// puts integer in R0, clobbers R1
+#define emit_MOVR0i(arg) do { \
+	emit(MOVW(R0, (arg&(0xFFFF)))); \
+	if (arg > 0xFFFF) \
+	{ \
+		emit(MOVW(R1, ((arg>>16)&0xFFFF))); \
+		emit(LSL(R1, R1, 16)); \
+		emit(ORR(R0, R0, R1)); \
+	} } while(0)
 
 #define STACK_PUSH(bytes) \
 	emit("addb $0x%x, %%bl", bytes >> 2); \
@@ -389,13 +397,21 @@ static unsigned short rimm(unsigned val)
 
 #define printreg(reg) emit(PUSH1(R3)); emit(BLX(reg)); emit(POP1(R3));
 
-#define OFFSET(var) (pass?((var-vm->codeLength)>>2)-2:(0xF000000F))
 void VM_Compile(vm_t *vm, vmHeader_t *header)
 {
 	unsigned char *code;
 	int i_count, pc, i;
 	int pass;
 	int startoffset = 0xf00ba1;
+	int codeoffsets[1024];
+
+#define j_rel(x) ((((unsigned)x)>>2)-2)
+#define OFFSET(i) (pass?(j_rel(codeoffsets[i]-vm->codeLength)):(0xF000000F))
+#define new_offset() (offsidx++)
+#define get_offset(i) (codeoffsets[i])
+#define save_offset(i) (codeoffsets[i] = vm->codeLength)
+#define OFF_CODE 0
+#define OFF_IMMEDIATES 1
 
 	vm->compiled = qfalse;
 
@@ -403,6 +419,8 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	vm->codeLength = 0;
 
 	for (pass = 0; pass < 2; ++pass) {
+
+	int offsidx = 0;
 
 	// const optimization
 	unsigned got_const = 0, const_value = 0;
@@ -426,7 +444,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	emit(MOV(rOPSTACKBASE, rOPSTACK));
 
 	emit(PUSH((1<<R1)|(1<<R2)));
-	emit(BLi(OFFSET(startoffset)));
+	emit(BLi(OFFSET(OFF_CODE)));
 	emit(POP((1<<R1)|(1<<R2))); // pop     {r1, r2}
 
 	emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
@@ -434,12 +452,17 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	emit(SUBi(SP, FP, 4));
 	emit(0xe8bd8800); // pop     {fp, pc};
 
-	emit(0xe1200070); /* just some space in case we jump wrongly */
-	emit(0xe1200070);
-	emit(0xe1200070);
-	emit(0xe1200070);
+	/* save some immediates here */
+	emit(BKPT(0));
+	emit(BKPT(0));
+	save_offset(OFF_IMMEDIATES);
+	emit((unsigned)asmcall);
+	emit((unsigned)vm->instructionPointers);
+	emit(BKPT(0));
+	emit(BKPT(0));
 
-	startoffset = vm->codeLength;
+	save_offset(OFF_CODE);
+	offsidx = OFF_IMMEDIATES+1;
 
 	code = (unsigned char *) header + header->codeOffset;
 	pc = 0;
@@ -490,7 +513,36 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_CALL:
-				emit(0xe1200070); // bkpt    0x0000
+#if 0
+				// save next instruction
+				emit_MOVR0i(i_count);
+				emit(STRa(R0, rDATABASE, rPSTACK));      // dataBase[pstack] = r0
+#endif
+				if (got_const) {
+					NOTIMPL(op);
+				} else {
+					int off_syscall = new_offset();
+					MAYBE_EMIT_CONST();
+					// get instruction nr from stack
+					emit(LDRTxi(R0, rOPSTACK, 4));  // r2 = *opstack; rOPSTACK -= 4
+					emit(CMPi(R0, 0)); // check if syscall
+					emit(cond(LT, Bi(OFFSET(off_syscall))));
+						// XXX
+						emit(BKPT(0));
+						//emit_MOVR0i((unsigned)vm->instructionPointers);
+						//emit(LDRa(R0, R0, R2));  // r0 = r0[r2]
+					save_offset(off_syscall);
+					emit(PUSH(bit(rOPSTACK) | bit(rOPSTACKBASE) | bit(rCODEBASE)
+						| bit(rPSTACK)| bit(rDATABASE)| bit(rDATAMASK)));
+					emit(MOV(R1, rPSTACK));
+					emit(LDRai(R4, rCODEBASE, get_offset(OFF_IMMEDIATES)+0)); // asmcall
+					//asm("bkpt #5");
+					emit(BLX(R4));
+					emit(POP(bit(rOPSTACK) | bit(rOPSTACKBASE) | bit(rCODEBASE)
+						| bit(rPSTACK)| bit(rDATABASE)| bit(rDATAMASK)));
+					// store return value
+					emit(STRaiw(R0, rOPSTACK, 4));      // opstack+=4; *opstack = r0
+				}
 				break;
 
 			case OP_PUSH:
@@ -504,13 +556,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_CONST:
 				MAYBE_EMIT_CONST();
-				emit(MOVM(R0, (arg.i&(0xFFFF))));
-				if (arg.i >= 1<<16)
-				{
-					emit(MOVM(R1, ((arg.i>>16)&0xFFFF)));
-					emit(LSL(R1, R1, 16));
-					emit(ORR(R0, R0, R1));
-				}
+				emit_MOVR0i(arg.i);
 				emit(STRaiw(R0, rOPSTACK, 4));      // opstack+=4; *opstack = r0
 				break;
 
@@ -614,7 +660,6 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_STORE4:
 				MAYBE_EMIT_CONST();
-				//emit(0xe1200070); // bkpt    0x0000 // breakpoint
 				// optimize: use load multiple
 				// value
 				emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
@@ -626,7 +671,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_ARG:
 				MAYBE_EMIT_CONST();
-				emit(LDRxiw(R0, rOPSTACK, 4));      // r0 = *opstack; rOPSTACK -= 4
+				emit(LDRTxi(R0, rOPSTACK, 4));      // r0 = *opstack; rOPSTACK -= 4
 				emit(ADDi(R1, rPSTACK, arg.b[0]));  // r1 = programStack+arg
 				emit(STRa(R0, rDATABASE, R1));      // dataBase[r1] = r0
 				break;
