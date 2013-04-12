@@ -248,6 +248,26 @@ static unsigned short rimm(unsigned val)
 	return (16-shift)<<8 | val;
 }
 
+// same as rimm but doesn't die, returns 0 if not encodable so don't call with zero as argument!
+static unsigned short can_encode(unsigned val)
+{
+	unsigned shift = 0;
+	if (!val)
+		DIE("can_encode: invalid argument");
+	if (val < 256)
+		return val;
+	// rotate the value until it fits
+	while (shift < 16 && (val>255 || !(val&3))) {
+		val =  (val&3)<<30 | val>>2;
+		++shift;
+	}
+	if (shift > 15 || val > 255) {
+		return 0;
+	}
+	return (16-shift)<<8 | val;
+}
+
+
 #define PREINDEX (1<<24)
 
 #define rASR 0b10
@@ -453,6 +473,7 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 	emit(0xe8bd8800); // pop     {fp, pc};
 
 	/* save some immediates here */
+	// TODO: use registers?
 	emit(BKPT(0));
 	emit(BKPT(0));
 	save_offset(OFF_IMMEDIATES);
@@ -504,11 +525,27 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 			case OP_ENTER:
 				MAYBE_EMIT_CONST();
 				emit(PUSH1(LR));
-				emit(SUBi(rPSTACK, rPSTACK, arg.i)); // pstack -= arg
+				if (arg.i == 0 || can_encode(arg.i))
+				{
+					emit(SUBi(rPSTACK, rPSTACK, arg.i)); // pstack -= arg
+				}
+				else
+				{
+					emit_MOVR0i(arg.i);
+					emit(SUB(rPSTACK, rPSTACK, R0)); // pstack -= arg
+				}
 				break;
 
 			case OP_LEAVE:
-				emit(ADDi(rPSTACK, rPSTACK, arg.i)); // pstack += arg
+				if (arg.i == 0 || can_encode(arg.i))
+				{
+					emit(ADDi(rPSTACK, rPSTACK, arg.i)); // pstack += arg
+				}
+				else
+				{
+					emit_MOVR0i(arg.i);
+					emit(ADD(rPSTACK, rPSTACK, R0)); // pstack += arg
+				}
 				emit(0xe49df004); // pop pc
 				break;
 
@@ -524,19 +561,19 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 					int off_syscall = new_offset();
 					MAYBE_EMIT_CONST();
 					// get instruction nr from stack
-					emit(LDRTxi(R0, rOPSTACK, 4));  // r2 = *opstack; rOPSTACK -= 4
+					emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
 					emit(CMPi(R0, 0)); // check if syscall
 					emit(cond(LT, Bi(OFFSET(off_syscall))));
-						// XXX
-						emit(BKPT(0));
-						//emit_MOVR0i((unsigned)vm->instructionPointers);
-						//emit(LDRa(R0, R0, R2));  // r0 = r0[r2]
+						emit(LDRai(R1, rCODEBASE, get_offset(OFF_IMMEDIATES)+4)); // instructionPointers
+						// FIXME: check range
+						emit(ADD(R0, R0, R1));
+						emit(BLX(R0));
+						emit(Bi(j_rel(vm->instructionPointers[pc+1]-vm->instructionPointers[pc])));
 					save_offset(off_syscall);
 					emit(PUSH(bit(rOPSTACK) | bit(rOPSTACKBASE) | bit(rCODEBASE)
 						| bit(rPSTACK)| bit(rDATABASE)| bit(rDATAMASK)));
 					emit(MOV(R1, rPSTACK));
 					emit(LDRai(R4, rCODEBASE, get_offset(OFF_IMMEDIATES)+0)); // asmcall
-					//asm("bkpt #5");
 					emit(BLX(R4));
 					emit(POP(bit(rOPSTACK) | bit(rOPSTACKBASE) | bit(rCODEBASE)
 						| bit(rPSTACK)| bit(rDATABASE)| bit(rDATAMASK)));
@@ -551,7 +588,8 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_POP:
-				NOTIMPL(op);
+				MAYBE_EMIT_CONST();
+				emit(SUBi(rOPSTACK, rOPSTACK, 4));
 				break;
 
 			case OP_CONST:
@@ -562,7 +600,15 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 
 			case OP_LOCAL:
 				MAYBE_EMIT_CONST();
-				emit(ADDi(R0, rPSTACK, arg.i));     // r0 = pstack+arg
+				if (arg.i == 0 || can_encode(arg.i))
+				{
+					emit(ADDi(R0, rPSTACK, arg.i));     // r0 = pstack+arg
+				}
+				else
+				{
+					emit_MOVR0i(arg.i);
+					emit(ADDi(R0, rPSTACK, R0));     // r0 = pstack+arg
+				}
 				emit(STRaiw(R0, rOPSTACK, 4));      // opstack+=4; *opstack = r0
 				break;
 
