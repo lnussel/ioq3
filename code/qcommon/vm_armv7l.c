@@ -270,16 +270,18 @@ static unsigned short can_encode(unsigned val)
 
 #define PREINDEX (1<<24)
 
-#define rASR 0b10
-#define rLSL 0b00
-#define rLSR 0b01
-#define rROR 0b11.
+#define rASR(i, reg) (0b10<<5 | ((i&31)<<7) | reg)
+#define rLSL(i, reg) (0b00<<5 | ((i&31)<<7) | reg)
+#define rLSR(i, reg) (0b01<<5 | ((i&31)<<7) | reg)
+#define rROR(i, reg) (0b11<<5 | ((i&31)<<7) | reg)
 
 // conditions
 #define EQ (0b0000<<28)
 #define NE (0b0001<<28)
 #define CS (0b0010<<28)
+#define HS CS
 #define CC (0b0011<<28)
+#define LO CC
 #define MI (0b0100<<28)
 #define PL (0b0101<<28)
 #define VS (0b0110<<28)
