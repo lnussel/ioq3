@@ -27,6 +27,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <time.h>
 #include <stddef.h>
 
+       #include <sys/types.h>
+       #include <sys/stat.h>
+       #include <fcntl.h>
+
 #include "vm_local.h"
 #define R0	0
 #define R1	1
@@ -224,6 +228,12 @@ static void blockcopy(unsigned int dest, unsigned int src, unsigned int count)
 
 void _emit(vm_t *vm, unsigned isn, int pass)
 {
+	static int fd = -2;
+	if (fd == -2)
+		fd = open("code.bin", O_TRUNC|O_WRONLY|O_CREAT, 0644);
+	if (fd > 0)
+		write(fd, &isn, 4);
+
 	if (pass)
 		memcpy(vm->codeBase+vm->codeLength, &isn, 4);
 	vm->codeLength+=4;
