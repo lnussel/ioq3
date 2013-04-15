@@ -414,11 +414,11 @@ static unsigned short can_encode(unsigned val)
 #define MUL(op1, op2, op3) \
 	(AL | 0b0000000<<21 | (1<<20) /*S*/ | (op1<<16) | (op3<<8) | 0b1001<<4 | (op2))
 
-// puts integer in R0, clobbers R1
+// puts integer in R0
 #define emit_MOVR0i(arg) do { \
-	emit(MOVW(R0, arg&0xFFFF)); \
+	emit(MOVW(R0, (arg&0xFFFF))); \
 	if (arg > 0xFFFF) \
-		emit(MOVT(R0, (arg>>16))); \
+		emit(MOVT(R0, (((arg>>16)&0xFFFF)))); \
 	} while(0)
 
 #define STACK_PUSH(bytes) \
