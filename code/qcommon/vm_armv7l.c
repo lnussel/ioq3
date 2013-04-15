@@ -441,6 +441,15 @@ static unsigned short can_encode(unsigned val)
 #define MAYBE_EMIT_CONST()
 #endif
 
+// optimize: use load multiple
+#define IJ(op) do { \
+				MAYBE_EMIT_CONST(); \
+				emit(LDRTxi(R0, rOPSTACK, 4)); \
+				emit(LDRTxi(R1, rOPSTACK, 4));  \
+				emit(CMP(R0, R1)); \
+				emit(cond(NE, Bi(j_rel(vm->instructionPointers[arg.i]-vm->codeLength)))); \
+} while (0)
+
 #define printreg(reg) emit(PUSH1(R3)); emit(BLX(reg)); emit(POP1(R3));
 
 static inline unsigned _j_rel(int x, int pc)
@@ -665,25 +674,11 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_EQ:
-				NOTIMPL(op);
+				IJ(EQ);
 				break;
 
 			case OP_NE:
-				MAYBE_EMIT_CONST();
-				// optimize: use load multiple
-				emit(LDRTxi(R0, rOPSTACK, 4));  // r0 = *opstack; rOPSTACK -= 4
-				emit(LDRTxi(R1, rOPSTACK, 4));  // r1 = *opstack; rOPSTACK -= 4
-				emit(CMP(R0, R1));
-				// check?
-#if 0
-				Com_Printf("arg %d i %d | %d-%d = %d -> 0x%x\n", arg.i, i_count,
-						vm->instructionPointers[arg.i],
-						vm->codeLength,
-						vm->instructionPointers[arg.i] - vm->codeLength,
-						j_rel(vm->instructionPointers[arg.i]-vm->codeLength));
-#endif
-				//emit(BKPT(0));
-				emit(cond(NE, Bi(j_rel(vm->instructionPointers[arg.i]-vm->codeLength))));
+				IJ(NE);
 				break;
 
 			case OP_LTI:
@@ -715,7 +710,8 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 				break;
 
 			case OP_GEU:
-				NOTIMPL(op);
+				// FIXME: check correctness
+				IJ(HS);
 				break;
 
 			case OP_EQF:
