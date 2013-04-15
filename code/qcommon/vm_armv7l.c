@@ -605,10 +605,10 @@ void VM_Compile(vm_t *vm, vmHeader_t *header)
 					emit(cond(LT, Bi(OFFSET(off_syscall))));
 						emit(LDRai(R1, rCODEBASE, get_offset(OFF_IMMEDIATES)+4)); // r1=instructionPointers
 						// FIXME: check range
-						emit(LDRai(R0, R1, R0)); // r0 = r1[r0]
-						emit(ADD(R0, rCODEBASE, R0)); // r0 = codeBase+r0
+						emit(LDRa(R0, R1, rLSL(2, R0))); // r0 = ((int*)r1)[r0]
+						emit(ADD(R0, rCODEBASE, R0)); // r0 = codeBase+4*r0
 						emit(BLX(R0));
-						emit(Bi(j_rel(vm->instructionPointers[i_count+1]-vm->instructionPointers[i_count])));
+						emit(Bi(j_rel(vm->instructionPointers[i_count+1]-vm->codeLength)));
 					save_offset(off_syscall);
 					emit(PUSH(bit(rOPSTACK) | bit(rOPSTACKBASE) | bit(rCODEBASE)
 						| bit(rPSTACK)| bit(rDATABASE)| bit(rDATAMASK)));
