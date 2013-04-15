@@ -323,7 +323,8 @@ static unsigned short can_encode(unsigned val)
 #define BICi(dst, src, i) (AL | (0b001<<25) | (0b11100<<20) | (src<<16) | (dst<<12) | rimm(i))
 #define MVNi(dst, src, i) (AL | (0b001<<25) | (0b11110<<20) | (src<<16) | (dst<<12) | rimm(i))
 
-#define MOVW(dst,      i) (AL |  (0b11<<24) | (((i>>12)&0xF)<<16) | (dst<<12) | (i&((1<<12)-1)))
+#define MOVW(dst,      i) (AL |  (0b11<<24)                 | ((((i)>>12)&0xF)<<16) | (dst<<12) | ((i)&((1<<12)-1)))
+#define MOVT(dst,      i) (AL |  (0b11<<24) |  (0b0100<<20) | ((((i)>>12)&0xF)<<16) | (dst<<12) | ((i)&((1<<12)-1)))
 
 #define TSTi(     src, i) (AL | (0b001<<25) | (0b10001<<20) | (src<<16) |             rimm(i))
 #define TEQi(     src, i) (AL | (0b001<<25) | (0b10011<<20) | (src<<16) |             rimm(i))
@@ -415,13 +416,10 @@ static unsigned short can_encode(unsigned val)
 
 // puts integer in R0, clobbers R1
 #define emit_MOVR0i(arg) do { \
-	emit(MOVW(R0, (arg&(0xFFFF)))); \
+	emit(MOVW(R0, arg&0xFFFF)); \
 	if (arg > 0xFFFF) \
-	{ \
-		emit(MOVW(R1, ((arg>>16)&0xFFFF))); \
-		emit(LSL(R1, R1, 16)); \
-		emit(ORR(R0, R0, R1)); \
-	} } while(0)
+		emit(MOVT(R0, (arg>>16))); \
+	} while(0)
 
 #define STACK_PUSH(bytes) \
 	emit("addb $0x%x, %%bl", bytes >> 2); \
