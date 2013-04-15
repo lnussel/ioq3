@@ -19,6 +19,11 @@ You should have received a copy of the GNU General Public License
 along with Quake III Arena source code; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
+
+Docu:
+http://www.coranac.com/tonc/text/asm.htm
+http://www.heyrick.co.uk/armwiki/Category:Opcodes
+ARMv7-A_ARMv7-R_DDI0406_2007.pdf
 */
 
 #include <sys/types.h>
